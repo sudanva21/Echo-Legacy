@@ -8,7 +8,7 @@ export async function POST(req: Request) {
   try {
     const { userEmail, characterId, action } = await req.json();
     
-    if (!userEmail || userEmail === 'samarthpasalkar4@gmail.com') {
+    if (!userEmail || userEmail === 'sudanva7@gmail.com') {
       return NextResponse.json({ allowed: true, count: 0, reason: 'admin' });
     }
 

@@ -1,7 +1,7 @@
 # EchoLegacy — Product Requirements Document
 **Version:** 1.1  
-**Author:** Samarth Pasalkar  
-**Hackathon:** Open Innovation — June 22, 2026  
+**Author:** Sudanva Shilannavar  
+**Event:** AI Expo  
 **Stack:** Next.js · Gemini API · Fish.audio · Supabase · Firebase · LivePortrait · Ngrok
 
 ---
@@ -56,7 +56,7 @@ The gap: Osho's books, lectures, and discourses exist — thousands of hours of 
 
 ## 5. Features
 
-### MVP (Must have for hackathon)
+### MVP (Must have for AI Expo)
 - [ ] Voice input via Web Speech API
 - [ ] RAG over Osho's corpus (Supabase pgvector + Gemini embeddings)
 - [ ] Gemini Flash response generation with Osho persona
@@ -66,7 +66,7 @@ The gap: Osho's books, lectures, and discourses exist — thousands of hours of 
 - [ ] Clean dark atmospheric UI
 - [ ] Deployed on Vercel (audio only fallback if Ngrok down)
 
-### V2 (Post hackathon)
+### V2 (Post AI Expo)
 - [ ] Multiple historical figures (Kalam, Vivekananda, Einstein, Rumi)
 - [ ] Mobile app (React Native)
 - [ ] AR mode — figure appears in your room
@@ -87,10 +87,10 @@ The gap: Osho's books, lectures, and discourses exist — thousands of hours of 
 
 ---
 
-## 7. Success Metrics (Hackathon)
+## 7. Success Metrics (AI Expo)
 
 - Working end-to-end voice conversation demo
-- Minimum 20 real users during hackathon 48hrs
+- Minimum 20 real user interactions during AI Expo
 - At least 5 shareable conversation screenshots
 - Judge demo under 2 minutes, emotionally clear
 
@@ -104,4 +104,4 @@ The gap: Osho's books, lectures, and discourses exist — thousands of hours of 
 | Ngrok tunnel drops | Pre-cache 20 common responses as MP4 |
 | Gemini hallucination | Strict RAG grounding, refuse out-of-corpus questions |
 | Fish.audio credits drain | Cap session at 7 exchanges, cache audio files |
-| Legal (personality rights) | Hackathon only, non-commercial, educational framing |
+| Legal (personality rights) | AI Expo showcase, non-commercial, educational framing |

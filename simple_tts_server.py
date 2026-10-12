@@ -3,9 +3,21 @@ Simple Local TTS Server for RTX 3050 4GB
 Optimized for reliability and speed
 """
 
-import os
-import torch
-import torchaudio
+import sys
+import io
+
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+try:
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+except ImportError:
+    torch = None
+    device = "cpu"
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import tempfile
@@ -27,13 +39,11 @@ CACHE_DIR = Path("./tts_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
 # Global model storage
-tts_model = None
-device = "cuda" if torch.cuda.is_available() else "cpu"
+tts_model = "edge"
 
-print(f"🚀 Starting Simple TTS Server on {device}")
-if torch.cuda.is_available():
-    print(f"💾 GPU: {torch.cuda.get_device_name(0)}")
-    print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
+print(f">> Starting Simple TTS Server on {device} with Edge-TTS")
+if torch and torch.cuda.is_available():
+    print(f">> GPU: {torch.cuda.get_device_name(0)}")
 
 def load_tts_model():
     """Load the best TTS model for RTX 3050"""
@@ -73,7 +83,7 @@ def health_check():
         "status": "healthy",
         "device": device,
         "model": str(type(tts_model).__name__) if tts_model else "none",
-        "vram_gb": torch.cuda.get_device_properties(0).total_memory / 1024**3 if torch.cuda.is_available() else 0
+        "vram_gb": (torch.cuda.get_device_properties(0).total_memory / 1024**3) if (torch and torch.cuda.is_available()) else 0
     })
 
 @app.route('/tts', methods=['POST'])
@@ -122,14 +132,14 @@ def generate_edge_tts(text, character_id, output_path):
     
     # Character voices
     voices = {
-        'osho': 'en-US-AriaNeural',
+        'osho': 'en-US-ChristopherNeural',
         'tesla': 'en-US-GuyNeural', 
-        'ssr': 'en-US-DavisNeural',
-        'bhagat_singh': 'en-IN-NeerjaNeural',
-        'hitler': 'en-US-TonyNeural'
+        'ssr': 'en-IN-PrabhatNeural',
+        'bhagat_singh': 'en-IN-PrabhatNeural',
+        'hitler': 'en-US-BrianNeural'
     }
     
-    voice = voices.get(character_id, 'en-US-AriaNeural')
+    voice = voices.get(character_id, 'en-US-ChristopherNeural')
     
     async def generate():
         communicate = edge_tts.Communicate(text, voice)
@@ -162,14 +172,14 @@ if __name__ == '__main__':
             exit(1)
     
     print("\n" + "="*50)
-    print("🎤 EchoLegacy Simple TTS Server")
+    print("EchoLegacy Simple TTS Server")
     print("="*50)
-    print(f"🖥️  Device: {device}")
-    print(f"🧠 Model: {tts_model}")
-    print(f"🌐 Server: http://localhost:5000")
-    print(f"📁 Cache: {CACHE_DIR}")
+    print(f"Device: {device}")
+    print(f"Model: {tts_model}")
+    print(f"Server: http://localhost:5000")
+    print(f"Cache: {CACHE_DIR}")
     print("="*50)
-    print("✅ Ready! Expected latency: 1-3 seconds")
+    print("Ready! Expected latency: 1-3 seconds")
     print("="*50)
     
     app.run(host='0.0.0.0', port=5000, debug=False)

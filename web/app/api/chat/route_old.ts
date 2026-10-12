@@ -68,7 +68,7 @@ export async function POST(req: Request) {
     console.log('[CHAT] Supabase client created');
 
     let interactionsCount = 0;
-    const ADMIN_EMAIL = 'samarthpasalkar4@gmail.com';
+    const ADMIN_EMAIL = 'sudanva7@gmail.com';
     const isAdmin = userEmail === ADMIN_EMAIL;
 
     // RATE LIMITING LOGIC - STRICT ENFORCEMENT

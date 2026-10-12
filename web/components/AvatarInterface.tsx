@@ -1,19 +1,19 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { createClient } from '@/utils/supabase/client'
-import { Mic, Send, LogOut, Loader2, Play, Download } from 'lucide-react'
+import { Mic, MicOff, Send, LogOut, Loader2, Download, Volume2, Sparkles } from 'lucide-react'
 import { characters, CharacterId } from '@/utils/characters'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { isValidAudioUrl } from '@/utils/errorMessage'
 import FeedbackModal from '@/components/FeedbackModal'
 
-type Phase = 'idle' | 'thinking' | 'speaking' | 'animating'
+type Phase = 'idle' | 'listening' | 'thinking' | 'speaking' | 'animating'
 
 // Quick questions for each character
 const getQuickQuestions = (characterId: CharacterId): string[] => {
-  const questionMap = {
+  const questionMap: Record<string, string[]> = {
     osho: ['What is meditation?', 'How to find inner peace?', 'What is love?', 'Who are you?'],
     bhagat_singh: ['What is freedom?', 'Why did you fight?', 'What is patriotism?', 'Who are you?'],
     ssr: ['What is consciousness?', 'Tell me about stars', 'What is quantum physics?', 'Who are you?'],
@@ -25,28 +25,33 @@ const getQuickQuestions = (characterId: CharacterId): string[] => {
 
 export default function AvatarInterface({ user, characterId }: { user: any, characterId: CharacterId }) {
   const [query, setQuery] = useState('')
-  const [transcript, setTranscript] = useState<{role: 'user' | 'avatar', content: string, audioUrl?: string}[]>([])
+  const [transcript, setTranscript] = useState<{ role: 'user' | 'avatar', content: string, audioUrl?: string }[]>([])
   const [phase, setPhase] = useState<Phase>('idle')
+  const [isListening, setIsListening] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [isClient, setIsClient] = useState(false)
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false)
   
-  const character = characters[characterId] || characters.osho; // fallback to osho
+  const character = characters[characterId] || characters.osho;
 
   const audioRef = useRef<HTMLAudioElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const recognitionRef = useRef<any>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
 
   const router = useRouter()
   const supabase = createClient()
 
-  // Fix hydration mismatch
   useEffect(() => {
     setIsClient(true)
   }, [])
 
   const handleLogout = async () => {
-    await supabase.auth.signOut()
+    try {
+      await supabase.auth.signOut()
+    } catch {}
     router.refresh()
     router.push('/')
   }
@@ -54,8 +59,8 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
   const handleFeedbackSubmit = async (rating: number, comment: string) => {
     try {
       await supabase.from('feedback').insert({
-        user_id: user.id,
-        user_email: user.email,
+        user_id: user?.id || 'demo-user',
+        user_email: user?.email || 'guest@ecolegacy.ai',
         character_id: characterId,
         rating,
         comment
@@ -65,16 +70,32 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
     }
   }
 
+  // Text-to-Speech browser fallback
+  const speakWithBrowserSynthesis = (text: string) => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.rate = 0.95
+      utterance.pitch = 1.0
+      window.speechSynthesis.speak(utterance)
+    }
+  }
+
   const handleSubmit = async (e: React.FormEvent | string) => {
-    let userQuery = '';
+    let userQuery = ''
     if (typeof e === 'string') {
-      userQuery = e;
+      userQuery = e
     } else {
-      e.preventDefault();
-      userQuery = query;
+      e.preventDefault()
+      userQuery = query
     }
 
-    if (!userQuery.trim() || phase !== 'idle') return
+    if (!userQuery.trim() || (phase !== 'idle' && phase !== 'listening')) return
+
+    // Stop listening if mic was active
+    if (isListening) {
+      stopVoiceInput()
+    }
 
     setQuery('')
     setTranscript(prev => [...prev, { role: 'user', content: userQuery }])
@@ -83,141 +104,217 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
     setVideoUrl(null)
 
     try {
-      // 1. Get Text Response (RAG) - now with caching
+      // 1. Get Character Response (LLM)
       const chatRes = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: userQuery, characterId, userEmail: user.email })
+        body: JSON.stringify({
+          query: userQuery,
+          characterId,
+          userEmail: user?.email || 'guest@ecolegacy.ai'
+        })
       })
+
       const chatData = await chatRes.json()
-      
       if (!chatRes.ok) {
-        if (chatRes.status === 429 || chatData.error === 'RATE_LIMIT_REACHED') {
-          setTranscript(prev => [...prev, { 
-            role: 'avatar', 
-            content: "You've reached the maximum limit of 2 free interactions. We'd love to hear your thoughts on the experience so far!"
-          }])
-          setIsFeedbackOpen(true)
-          setPhase('idle')
-          return
-        }
-        if (chatRes.status === 403 || chatData.error === 'CHARACTER_LOCKED') {
-          setTranscript(prev => [...prev, { 
-            role: 'avatar', 
-            content: `You can only interact with one character per account. You're locked to your first choice. Please go back and select that character.`
-          }])
-          setPhase('idle')
-          return
-        }
-        throw new Error(chatData.error || 'Failed to generate response')
+        throw new Error(chatData.error || 'Failed to generate discourse')
       }
-      
+
       const responseText = chatData.text
       setPhase('speaking')
 
-      // 2. Get Voice (TTS) - now with caching and multiple tokens
+      // 2. Synthesize Character Voice (TTS)
       const ttsRes = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: responseText, characterId, userEmail: user.email })
+        body: JSON.stringify({
+          text: responseText,
+          characterId,
+          userEmail: user?.email || 'guest@ecolegacy.ai'
+        })
       })
-      const ttsData = await ttsRes.json()
 
-      if (!ttsRes.ok) {
-        // If TTS fails, still show the text response
-        console.warn('TTS failed:', ttsData.error)
-        setTranscript(prev => [...prev, { 
-          role: 'avatar', 
-          content: responseText + ' [Audio generation failed - please try again later]'
+      const ttsData = await ttsRes.json()
+      const generatedAudioUrl = ttsData?.audioUrl as string | undefined
+
+      if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
+        setAudioUrl(generatedAudioUrl)
+        setTranscript(prev => [...prev, {
+          role: 'avatar',
+          content: responseText,
+          audioUrl: generatedAudioUrl
         }])
-        setPhase('idle')
-        return
-      }
-      
-      const generatedAudioUrl = ttsData.audioUrl as string | undefined
-      if (!isValidAudioUrl(generatedAudioUrl)) {
-        console.warn('TTS returned invalid/empty audio')
-        setTranscript(prev => [...prev, { 
-          role: 'avatar', 
-          content: responseText + ' [Audio generation failed - empty response from TTS server]'
+      } else {
+        // Fallback to browser speech synthesis
+        speakWithBrowserSynthesis(responseText)
+        setTranscript(prev => [...prev, {
+          role: 'avatar',
+          content: responseText
         }])
-        setPhase('idle')
-        return
       }
-      setAudioUrl(generatedAudioUrl!)
-      
-      // Add response to transcript with audio URL for download
-      setTranscript(prev => [...prev, { 
-        role: 'avatar', 
-        content: responseText, 
-        audioUrl: generatedAudioUrl 
-      }])
-      
+
       setPhase('animating')
 
-      // 3. Get Video (Wav2Lip via Ngrok)
-      try {
-        const vidRes = await fetch('/api/animate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioUrl: ttsData.audioUrl, characterId })
-        })
-        const vidData = await vidRes.json()
-        
-        if (vidRes.ok && vidData.videoUrl) {
-          setVideoUrl(vidData.videoUrl)
-        } else if (vidRes.ok && !vidData.videoUrl) {
-          // Expected when NGROK/Wav2Lip is not configured — audio still plays
-        } else {
-          console.warn('Video animation failed, falling back to audio only.')
+      // 3. Optional video animation
+      if (generatedAudioUrl) {
+        try {
+          const vidRes = await fetch('/api/animate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audioUrl: generatedAudioUrl, characterId })
+          })
+          const vidData = await vidRes.json()
+          if (vidRes.ok && vidData.videoUrl) {
+            setVideoUrl(vidData.videoUrl)
+          }
+        } catch {
+          // Video animation is optional
         }
-      } catch (vidErr) {
-        console.warn('Video animation failed, falling back to audio only.', vidErr)
-      }
-
-      // Automatically display feedback popup after 1st interaction for non-admins
-      if (chatData.interactionsCount === 1 && !chatData.isAdmin) {
-        setTimeout(() => setIsFeedbackOpen(true), 2000)
       }
 
     } catch (err: unknown) {
       console.error(err)
       const msg = err instanceof Error ? err.message : String(err)
-      setTranscript(prev => [...prev, { role: 'avatar', content: `[Error: ${msg}]` }])
+      setTranscript(prev => [...prev, { role: 'avatar', content: `[${character.name}]: I am present here with you. Let us speak again.` }])
     } finally {
       setPhase('idle')
     }
   }
 
-  // Auto-play audio when it becomes available (unless video is ready first, though unlikely)
+  // Voice Input (Web Speech API + MediaRecorder Groq Whisper Fallback)
+  const startVoiceInput = async () => {
+    if (phase !== 'idle') return
+
+    setIsListening(true)
+    setPhase('listening')
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition()
+        recognition.continuous = false
+        recognition.interimResults = true
+        recognition.lang = 'en-US'
+
+        recognition.onresult = (event: any) => {
+          const transcriptText = Array.from(event.results)
+            .map((res: any) => res[0].transcript)
+            .join('')
+          setQuery(transcriptText)
+        }
+
+        recognition.onerror = (event: any) => {
+          console.warn('[VOICE] Speech recognition error:', event.error)
+          stopVoiceInput()
+        }
+
+        recognition.onend = () => {
+          setIsListening(false)
+          setPhase('idle')
+        }
+
+        recognitionRef.current = recognition
+        recognition.start()
+        return
+      } catch (e) {
+        console.warn('[VOICE] Native SpeechRecognition start failed, trying MediaRecorder:', e)
+      }
+    }
+
+    // Fallback: Record microphone audio and send to /api/stt (Groq Whisper)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      audioChunksRef.current = []
+      const recorder = new MediaRecorder(stream)
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+      }
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(track => track.stop())
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+        
+        if (audioBlob.size > 1000) {
+          const formData = new FormData()
+          formData.append('file', audioBlob, 'recording.webm')
+
+          try {
+            const res = await fetch('/api/stt', { method: 'POST', body: formData })
+            const data = await res.json()
+            if (data.text) {
+              setQuery(data.text)
+              handleSubmit(data.text)
+            }
+          } catch (sttErr) {
+            console.error('[STT] Remote transcription error:', sttErr)
+          }
+        }
+        setIsListening(false)
+        setPhase('idle')
+      }
+
+      mediaRecorderRef.current = recorder
+      recorder.start()
+    } catch (micErr) {
+      console.error('[VOICE] Microphone permission denied or unavailable:', micErr)
+      setIsListening(false)
+      setPhase('idle')
+    }
+  }
+
+  const stopVoiceInput = () => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop() } catch {}
+      recognitionRef.current = null
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop() } catch {}
+      mediaRecorderRef.current = null
+    }
+
+    setIsListening(false)
+    if (phase === 'listening') setPhase('idle')
+  }
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      stopVoiceInput()
+    } else {
+      startVoiceInput()
+    }
+  }
+
+  // Auto-play audio when available
   useEffect(() => {
     if (audioUrl && isValidAudioUrl(audioUrl) && !videoUrl && audioRef.current) {
-      audioRef.current.play().catch(e => console.error("Audio autoplay failed", e))
+      audioRef.current.play().catch(e => console.error("Audio autoplay failed:", e))
     }
   }, [audioUrl, videoUrl])
 
-  // Auto-play video when it becomes available
   useEffect(() => {
     if (videoUrl && videoRef.current) {
-      videoRef.current.play().catch(e => console.error("Video autoplay failed", e))
+      videoRef.current.play().catch(e => console.error("Video autoplay failed:", e))
     }
   }, [videoUrl])
 
   return (
-    <div className="w-full max-w-4xl mx-auto flex flex-col h-screen p-4 gap-4">
+    <div className="w-full max-w-5xl mx-auto flex flex-col h-screen p-4 sm:p-6 gap-4 font-sans">
       {/* Header */}
-      <header className="flex justify-between items-center py-4 border-b border-zinc-800">
+      <header className="flex justify-between items-center py-3 border-b border-zinc-800/80">
         <div className="flex items-center gap-4">
-          <Link href="/" className="text-zinc-400 hover:text-white text-sm">
-            &larr; Back
+          <Link href="/" className="text-zinc-400 hover:text-white text-sm flex items-center gap-1.5 transition-colors">
+            &larr; <span className="hidden sm:inline">All Personas</span>
           </Link>
-          <div>
-            <h1 className="text-xl font-bold tracking-tighter">Echoes: {character.name}</h1>
-            <p className="text-xs text-zinc-500">Authenticated as {user.email}</p>
+          <div className="flex items-center gap-2.5">
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.7)]" />
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">{character.name}</h1>
           </div>
         </div>
-        <button onClick={handleLogout} className="text-zinc-400 hover:text-white flex items-center gap-2 text-sm">
-          <LogOut size={16} /> Sign out
+        <button onClick={handleLogout} className="text-zinc-400 hover:text-white flex items-center gap-2 text-sm transition-colors">
+          <LogOut size={16} /> <span className="hidden sm:inline">Sign out</span>
         </button>
       </header>
 
@@ -225,53 +322,71 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
       <div className="flex-1 flex flex-col md:flex-row gap-6 min-h-0">
         
         {/* Avatar Visuals */}
-        <div className="w-full md:w-1/2 flex flex-col items-center justify-center bg-zinc-900 rounded-2xl p-4 relative overflow-hidden">
+        <div className="w-full md:w-1/2 flex flex-col items-center justify-center bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-6 relative overflow-hidden backdrop-blur-sm">
           {videoUrl ? (
             <video 
               ref={videoRef}
               src={videoUrl} 
-              className="w-full h-full object-cover rounded-xl"
+              className="w-full h-full object-cover rounded-xl shadow-2xl"
               controls
               autoPlay
             />
           ) : (
-            <div className="relative w-full aspect-square max-w-sm rounded-xl overflow-hidden bg-zinc-800 flex items-center justify-center">
-              {/* Placeholder Image */}
+            <div className="relative w-full aspect-square max-w-sm rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-800 shadow-2xl flex items-center justify-center group">
               <img 
                 src={character.image} 
                 alt={character.name} 
-                className="absolute inset-0 w-full h-full object-cover opacity-80"
+                className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-105"
                 onError={(e) => {
                   e.currentTarget.src = "https://upload.wikimedia.org/wikipedia/commons/3/33/Osho_in_his_library_1.jpg"
                 }}
               />
+              <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
               
               {/* Status Overlay */}
               {phase !== 'idle' && (
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/70 backdrop-blur-md text-white px-4 py-2 rounded-full text-sm flex items-center gap-2 whitespace-nowrap">
-                  <Loader2 size={16} className="animate-spin" />
-                  {phase === 'thinking' && 'Thinking...'}
-                  {phase === 'speaking' && 'Generating Voice...'}
-                  {phase === 'animating' && 'Animating Video...'}
+                <div className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-md border border-white/10 text-white px-5 py-2.5 rounded-full text-sm flex items-center gap-2.5 shadow-xl whitespace-nowrap">
+                  {phase === 'listening' && (
+                    <>
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                      <span className="text-red-400 font-medium">Listening to your voice...</span>
+                    </>
+                  )}
+                  {phase === 'thinking' && (
+                    <>
+                      <Loader2 size={16} className="animate-spin text-indigo-400" />
+                      <span>Reflecting...</span>
+                    </>
+                  )}
+                  {phase === 'speaking' && (
+                    <>
+                      <Volume2 size={16} className="text-emerald-400 animate-pulse" />
+                      <span>Speaking...</span>
+                    </>
+                  )}
+                  {phase === 'animating' && (
+                    <>
+                      <Sparkles size={16} className="text-cyan-400" />
+                      <span>Animating discourse...</span>
+                    </>
+                  )}
                 </div>
               )}
             </div>
           )}
 
-          {/* Hidden audio element for fallback when video isn't ready */}
+          {/* Hidden audio element for speech playback */}
           {audioUrl && !videoUrl && (
             <audio ref={audioRef} src={audioUrl} className="hidden" />
           )}
 
-          {/* Download Audio Button */}
+          {/* Audio Download Button */}
           {audioUrl && (
             <div className="absolute top-4 right-4 z-10">
               <a 
                 href={audioUrl} 
-                download="response.wav" 
-                target="_blank" 
-                rel="noreferrer"
-                className="p-2 bg-black/60 hover:bg-black/80 backdrop-blur-md rounded-full text-white flex items-center justify-center transition-all shadow-lg"
+                download={`${character.id}_response.wav`} 
+                className="p-2.5 bg-black/60 hover:bg-black/90 backdrop-blur-md rounded-full text-white flex items-center justify-center transition-all shadow-lg border border-white/10"
                 title="Download Audio"
               >
                 <Download size={18} />
@@ -280,21 +395,27 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
           )}
         </div>
 
-        {/* Chat Interface */}
-        <div className="w-full md:w-1/2 flex flex-col bg-zinc-900 rounded-2xl border border-zinc-800 overflow-hidden">
+        {/* Chat / Discourse Interface */}
+        <div className="w-full md:w-1/2 flex flex-col bg-zinc-900/60 border border-zinc-800/80 rounded-2xl overflow-hidden backdrop-blur-sm">
           {/* Transcript */}
-          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 flex flex-col gap-4">
             {transcript.length === 0 && (
-              <div className="m-auto text-center text-zinc-500 w-full flex flex-col items-center">
-                <p className="mb-6">Ask a question to begin the discourse.</p>
+              <div className="m-auto text-center text-zinc-400 w-full flex flex-col items-center">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mb-4">
+                  <Mic className="w-6 h-6 text-indigo-400" />
+                </div>
+                <h3 className="text-white font-medium text-base mb-1">Start Voice or Text Discourse</h3>
+                <p className="text-xs text-zinc-400 max-w-xs mb-6">
+                  Speak into your microphone or ask any question on your own to hear {character.name}&apos;s authentic voice and perspective.
+                </p>
                 {isClient && (
-                  <div className="flex flex-wrap gap-2 justify-center mt-4 max-w-sm">
+                  <div className="flex flex-wrap gap-2 justify-center max-w-sm">
                     {getQuickQuestions(characterId).map(q => (
                       <button 
                         key={q}
                         onClick={() => handleSubmit(q)}
-                        disabled={phase !== 'idle'}
-                        className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm rounded-full transition-colors border border-zinc-700/50 disabled:opacity-50"
+                        disabled={phase !== 'idle' && phase !== 'listening'}
+                        className="px-3.5 py-1.5 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-xs rounded-full transition-all border border-zinc-700/60 hover:border-indigo-500/50 hover:text-white"
                       >
                         {q}
                       </button>
@@ -306,24 +427,24 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
             {transcript.map((msg, i) => (
               <div key={i} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs text-zinc-500 px-1">
+                  <span className="text-xs text-zinc-400 font-medium px-1">
                     {msg.role === 'user' ? 'You' : character.name}
                   </span>
                   {msg.role === 'avatar' && msg.audioUrl && (
                     <a 
                       href={msg.audioUrl} 
-                      download={`${character.name}_response_${i}.wav`}
-                      className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
+                      download={`${character.id}_response_${i}.wav`}
+                      className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1 transition-colors"
                       title="Download audio"
                     >
                       <Download size={12} />
                     </a>
                   )}
                 </div>
-                <div className={`px-4 py-3 rounded-2xl max-w-[85%] ${
+                <div className={`px-4 py-3 rounded-2xl max-w-[88%] text-sm leading-relaxed ${
                   msg.role === 'user' 
-                    ? 'bg-zinc-100 text-zinc-900 rounded-tr-sm' 
-                    : 'bg-zinc-800 text-zinc-100 rounded-tl-sm'
+                    ? 'bg-gradient-to-r from-indigo-600 to-blue-600 text-white rounded-tr-sm shadow-md' 
+                    : 'bg-zinc-800 text-zinc-100 rounded-tl-sm border border-zinc-700/60 shadow-md'
                 }`}>
                   {msg.content}
                 </div>
@@ -331,30 +452,39 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
             ))}
           </div>
 
-          {/* Input Area */}
-          <div className="p-4 bg-zinc-950 border-t border-zinc-800">
-            <form onSubmit={handleSubmit} className="flex gap-2">
+          {/* Voice Input & Query Area */}
+          <div className="p-4 bg-zinc-950/80 border-t border-zinc-800/80">
+            <form onSubmit={handleSubmit} className="flex items-center gap-2">
               <button 
                 type="button"
-                className="p-3 rounded-full bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors"
-                title="Voice input coming soon"
+                onClick={toggleVoiceInput}
+                disabled={phase !== 'idle' && phase !== 'listening'}
+                className={`p-3 rounded-full transition-all flex items-center justify-center ${
+                  isListening 
+                    ? 'bg-red-600 text-white ring-4 ring-red-500/30 animate-pulse' 
+                    : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'
+                }`}
+                title={isListening ? "Click to stop listening" : "Click to speak via voice"}
               >
-                <Mic size={20} />
+                {isListening ? <MicOff size={20} /> : <Mic size={20} />}
               </button>
+              
               <input 
                 type="text" 
                 value={query}
                 onChange={e => setQuery(e.target.value)}
-                placeholder="Message..."
-                className="flex-1 bg-zinc-800 border-none rounded-full px-4 text-white focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                disabled={phase !== 'idle'}
+                placeholder={isListening ? "Listening... speak now" : "Ask anything in your own words..."}
+                className="flex-1 bg-zinc-800/90 border border-zinc-700/50 rounded-full px-5 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
+                disabled={phase !== 'idle' && phase !== 'listening'}
               />
+              
               <button 
                 type="submit"
-                disabled={!query.trim() || phase !== 'idle'}
-                className="p-3 rounded-full bg-zinc-100 text-zinc-900 hover:bg-white transition-colors disabled:opacity-50"
+                disabled={!query.trim() || (phase !== 'idle' && phase !== 'listening')}
+                className="p-3 rounded-full bg-white text-zinc-900 hover:bg-zinc-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-md"
+                title="Send message"
               >
-                <Send size={20} />
+                <Send size={18} />
               </button>
             </form>
           </div>

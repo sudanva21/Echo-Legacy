@@ -9,7 +9,7 @@ export default async function FeedbackPage() {
   // Verify admin access
   const { data: { user } } = await supabase.auth.getUser()
   
-  if (!user || user.email !== 'samarthpasalkar4@gmail.com') {
+  if (!user || user.email !== 'sudanva7@gmail.com') {
     return (
       <div className="min-h-screen bg-zinc-950 p-6 md:p-12 flex items-center justify-center">
         <div className="text-center bg-zinc-900 border border-red-900/50 p-8 rounded-3xl max-w-md w-full">
@@ -57,7 +57,7 @@ export default async function FeedbackPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {feedbackData.map((item) => (
+            {feedbackData.map((item: any) => (
               <div 
                 key={item.id} 
                 className="bg-zinc-900/50 border border-zinc-800/80 rounded-3xl p-6 relative overflow-hidden group hover:bg-zinc-900 hover:border-zinc-700 transition-all"

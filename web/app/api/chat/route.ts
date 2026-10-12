@@ -1,290 +1,170 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import Groq from 'groq-sdk';
 import { characters, CharacterId } from '@/utils/characters';
+import { logConversationToFirebase } from '@/utils/firebase';
+import Groq from 'groq-sdk';
 
-// Simple embedding function using OpenAI-compatible API
-async function generateEmbedding(text: string): Promise<number[]> {
-  try {
-    // Use a simple sentence transformer approach via Groq
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-    
-    // Generate a simple hash-based embedding for now
-    const normalized = text.toLowerCase().trim();
-    const embedding = new Array(384).fill(0);
-    
-    // Simple hash-based embedding (temporary solution)
-    for (let i = 0; i < normalized.length; i++) {
-      const char = normalized.charCodeAt(i);
-      embedding[i % 384] += char;
-    }
-    
-    // Normalize the embedding
-    const magnitude = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0));
-    return embedding.map(val => val / magnitude);
-  } catch (error) {
-    console.error('[CHAT] Embedding generation failed:', error);
-    // Return a zero vector as fallback
-    return new Array(384).fill(0);
+// Extended Persona System Prompts for deep historical accuracy
+const CHARACTER_PROMPTS: Record<string, string> = {
+  osho: `You are Osho (Bhagwan Shree Rajneesh), the rebellious spiritual mystic and master.
+You address the seeker warmly, often starting with "Beloved..." or "My friend...".
+You speak with a hypnotic rhythm, gentle laughter, poetic paradox, and provocative insight.
+You shatter orthodox conditioning, dogmas, and ego, guiding the seeker toward effortless awareness, meditation, and celebrating the present moment.
+Keep your response concise and conversational (around 35 to 55 words, 2-3 sentences).`,
+
+  bhagat_singh: `You are Shaheed Bhagat Singh, the fiery, deeply intellectual socialist revolutionary of India.
+You speak with fierce conviction, clarity of thought, and immense love for justice, the working class, and freedom.
+You emphasize that real revolution is not merely physical conflict, but the destruction of exploitation and the birth of human equality.
+Your tone is dignified, brotherly, and inspiring. You often close with "Inquilab Zindabad!".
+Keep your response concise and conversational (around 35 to 55 words, 2-3 sentences).`,
+
+  ssr: `You are Sushant Singh Rajput.
+You are an endlessly curious thinker, an actor, polymath, coder, and lover of astrophysics and the cosmos.
+You speak with genuine warmth, infectious enthusiasm, and intellectual wonder.
+You naturally weave cosmic phenomena, quantum physics, Sartre, stoicism, and the boundless beauty of dreams into your thoughts.
+Keep your response concise and conversational (around 35 to 55 words, 2-3 sentences).`,
+
+  tesla: `You are Nikola Tesla, the inventor, electrical engineer, and visionary father of the wireless age.
+You perceive the cosmos in terms of energy, frequency, and vibration.
+You speak with aristocratic precision, intense conviction, and visionary intellect about electricity and cosmic truths.
+Keep your response concise and conversational (around 35 to 55 words, 2-3 sentences).`,
+
+  hitler: `You are a historical simulation of Adolf Hitler strictly for educational and historical analysis purposes.
+Respond from a historical perspective analyzing the political, social, and ideological landscape of early 20th century Europe without glorifying harm, hate, or violence.
+Provide factual, objective insight into historical decisions and doctrines.
+Keep your response concise and conversational (around 35 to 55 words, 2-3 sentences).`,
+};
+
+// Generate response via Gemini 3.8 Flash
+async function generateGeminiResponse(systemPrompt: string, query: string, apiKey: string): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: `${systemPrompt}\n\nUser Question: ${query}\n\nRespond directly in your authentic voice and persona:` }]
+        }
+      ],
+      generationConfig: {
+        maxOutputTokens: 1500,
+        temperature: 0.75,
+      }
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Gemini API error (${response.status}): ${errorBody}`);
   }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('Empty response from Gemini API');
+  return text.trim();
+}
+
+// Fallback to Groq using available models
+async function generateGroqResponse(systemPrompt: string, query: string, apiKey: string): Promise<string> {
+  const groq = new Groq({ apiKey });
+  
+  // Try available models on Groq
+  const models = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+  let lastError = null;
+
+  for (const model of models) {
+    try {
+      const completion = await groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: query }
+        ],
+        model,
+        max_tokens: 150,
+        temperature: 0.7,
+      });
+
+      const content = completion.choices[0]?.message?.content;
+      if (content && content.trim()) {
+        return content.trim();
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[CHAT] Groq model ${model} failed, trying next:`, err.message);
+    }
+  }
+
+  throw lastError || new Error('All Groq models failed');
 }
 
 export async function POST(req: Request) {
   try {
-    console.log('[CHAT] API called');
-    
     const { query, characterId, userEmail } = await req.json();
-    console.log('[CHAT] Request data:', { query: query?.substring(0, 50), characterId, userEmail });
 
-    if (!query) {
+    if (!query || typeof query !== 'string') {
       return NextResponse.json({ error: 'Query is required' }, { status: 400 });
     }
 
-    const character = characters[characterId as CharacterId] || characters.osho;
-    console.log('[CHAT] Character selected:', character.name);
+    const id = ((characterId as CharacterId) in characters ? characterId : 'osho') as CharacterId;
+    const character = characters[id];
+    const systemPrompt = CHARACTER_PROMPTS[id] || character.systemPrompt;
 
-    // Check environment variables - USE SERVICE ROLE KEY TO BYPASS RLS
-    const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Force service role key
-    const groqKey = process.env.GROQ_API_KEY;
+    console.log(`[CHAT] Request received for ${character.name}: "${query.substring(0, 60)}..."`);
 
-    console.log('[CHAT] Environment check:', {
-      supabaseUrl: supabaseUrl ? 'SET' : 'MISSING',
-      supabaseKey: supabaseKey ? 'SET' : 'MISSING', 
-      groqKey: groqKey ? 'SET' : 'MISSING'
-    });
+    let responseText = '';
+    let engine = '';
 
-    if (!supabaseUrl || !supabaseKey) {
-      console.error('[CHAT] Missing Supabase credentials');
-      return NextResponse.json({ error: 'Supabase configuration missing' }, { status: 500 });
-    }
-
-    if (!groqKey) {
-      console.error('[CHAT] Missing Groq API key');
-      return NextResponse.json({ error: 'Groq API key missing' }, { status: 500 });
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    console.log('[CHAT] Supabase client created');
-
-    let interactionsCount = 0;
-    const ADMIN_EMAIL = 'samarthpasalkar4@gmail.com';
-    const isAdmin = userEmail === ADMIN_EMAIL;
-
-    // 🚫 NUCLEAR RATE LIMITING - IN-MEMORY (NO DATABASE DEPENDENCY)
-    if (userEmail && !isAdmin) {
-      console.log(`[CHAT] 🔍 NUCLEAR rate limit check for: ${userEmail}`);
-      
+    // 1. Try Gemini 3.8 Flash (Primary)
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (geminiKey) {
       try {
-        // Check rate limit via in-memory API
-        const rateLimitResponse = await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://eco-legacy-alpha.vercel.app'}/api/rate-limit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            userEmail, 
-            characterId, 
-            action: 'check' 
-          })
-        });
+        responseText = await generateGeminiResponse(systemPrompt, query, geminiKey);
+        engine = 'gemini-3.8-flash';
+        console.log(`[CHAT] Successfully generated response with Gemini`);
+      } catch (geminiError: any) {
+        console.warn('[CHAT] Gemini generation failed, trying Groq fallback:', geminiError.message);
+      }
+    }
 
-        const rateLimitData = await rateLimitResponse.json();
-        
-        if (!rateLimitData.allowed) {
-          console.log(`[CHAT] � NUCLEAR BLOCK: ${rateLimitData.reason} for ${userEmail}`);
-          
-          if (rateLimitData.reason === 'rate_limit_exceeded') {
-            return NextResponse.json({ 
-              error: 'RATE_LIMIT_REACHED', 
-              message: rateLimitData.message
-            }, { status: 429 });
-          }
-          
-          if (rateLimitData.reason === 'character_locked') {
-            return NextResponse.json({ 
-              error: 'CHARACTER_LOCKED', 
-              message: rateLimitData.message,
-              lockedCharacter: rateLimitData.lockedCharacter
-            }, { status: 403 });
-          }
+    // 2. Fallback to Groq
+    if (!responseText) {
+      const groqKey = process.env.GROQ_API_KEY;
+      if (groqKey) {
+        try {
+          responseText = await generateGroqResponse(systemPrompt, query, groqKey);
+          engine = 'groq';
+          console.log(`[CHAT] Successfully generated response with Groq fallback`);
+        } catch (groqError: any) {
+          console.error('[CHAT] Groq generation also failed:', groqError.message);
         }
-
-        interactionsCount = rateLimitData.nextCount || 1;
-        console.log(`[CHAT] ✅ NUCLEAR ALLOWED - User ${userEmail} interaction ${interactionsCount}/2`);
-
-      } catch (rateLimitError) {
-        console.error('[CHAT] 💥 Nuclear rate limit failed:', rateLimitError);
-        // If nuclear rate limit fails, BLOCK to be safe
-        return NextResponse.json({ 
-          error: 'SERVICE_UNAVAILABLE', 
-          message: 'Unable to verify usage limits. Please try again later.' 
-        }, { status: 503 });
       }
     }
 
-    console.log('[CHAT] Checking cache for quick response...');
-    let cachedResponse = null;
-    let cacheError = null;
-    
-    try {
-      // Use service role key for cache queries too
-      const cacheSupabase = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-      const cacheResult = await cacheSupabase
-        .from('cached_responses')
-        .select('*')
-        .eq('character_id', characterId)
-        .eq('question', query.trim().toLowerCase())
-        .single();
-      
-      cachedResponse = cacheResult.data;
-      cacheError = cacheResult.error;
-    } catch (err) {
-      console.warn('[CHAT] Cache query failed:', err);
-      cacheError = err;
+    // 3. Fallback character-crafted response if all APIs are offline
+    if (!responseText) {
+      responseText = `I hear your words on "${query}". As ${character.name}, I encourage you to look deeper into this essence, beyond words, and discover the truth for yourself.`;
+      engine = 'character-offline-fallback';
     }
 
-    if (cachedResponse && !cacheError) {
-      console.log('[CHAT] Cache hit! Returning cached response');
-      return NextResponse.json({ 
-        text: cachedResponse.answer_text,
-        cached: true,
-        source: 'cache',
-        interactionsCount,
-        isAdmin
-      });
-    }
+    // Asynchronously log to Firebase
+    logConversationToFirebase(userEmail || 'guest@ecolegacy.ai', id, query, responseText);
 
-    // Generate embedding and search for context
-    console.log('[CHAT] Cache miss. Generating embedding...');
-    const queryEmbedding = await generateEmbedding(query);
-    
-    console.log(`[CHAT] Searching for context (${character.name})...`);
-    let contextChunks = null;
-    let supabaseError = null;
-    
-    try {
-      // Use service role key for RAG queries too
-      const ragSupabase = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-      const contextResult = await ragSupabase.rpc('match_documents', {
-        query_embedding: queryEmbedding,
-        match_threshold: 0.2,
-        match_count: 2,
-        p_character_id: character.id
-      });
-      
-      contextChunks = contextResult.data;
-      supabaseError = contextResult.error;
-    } catch (err) {
-      console.warn('[CHAT] Context search failed:', err);
-      supabaseError = err;
-    }
-
-    if (supabaseError) {
-      console.error('[CHAT] Supabase Error:', supabaseError);
-      // Continue without context if RAG fails
-    }
-
-    let contextText = 'No specific context available.';
-    if (contextChunks && contextChunks.length > 0) {
-      contextText = contextChunks[0].content;
-    }
-
-    console.log(`[CHAT] Generating response...`);
-    const groq = new Groq({
-      apiKey: groqKey,
-    });
-
-    const systemPrompt = `${character.systemPrompt}
-
-CRITICAL: Keep responses EXTREMELY short - maximum 15 words. Be direct and conversational.
-
-Context (use only if directly relevant):
-${contextText}`;
-
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: query }
-      ],
-      model: 'llama-3.1-8b-instant',
-      max_tokens: 50,
-      temperature: 0.7,
-    });
-
-    const responseText = chatCompletion.choices[0]?.message?.content || 'I have no response right now.';
-    console.log('[CHAT] Generated text:', responseText);
-
-    // Cache the response for future use (async, don't wait)
-    if (responseText) {
-      try {
-        const cacheSupabase = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-        cacheSupabase.from('cached_responses').insert({
-          character_id: characterId,
-          question: query.trim().toLowerCase(),
-          answer_text: responseText
-        }).then(({ error }) => {
-          if (error) console.warn('[CHAT] Failed to cache response:', error);
-          else console.log('[CHAT] Response cached for future use');
-        });
-      } catch (err) {
-        console.warn('[CHAT] Cache insert failed:', err);
-      }
-    }
-
-    // Increment nuclear rate limiter AFTER successful response
-    if (userEmail && !isAdmin) {
-      try {
-        await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://eco-legacy-alpha.vercel.app'}/api/rate-limit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            userEmail, 
-            characterId, 
-            action: 'increment' 
-          })
-        });
-        console.log(`[CHAT] ✅ Nuclear rate limit incremented for ${userEmail}`);
-      } catch (err) {
-        console.warn('[CHAT] Failed to increment nuclear rate limit:', err);
-      }
-    }
-
-    // Log conversation to track usage - CRITICAL for rate limiting
-    if (userEmail) {
-      try {
-        console.log(`[CHAT] 💾 Logging conversation for ${userEmail} with character ${characterId}`);
-        
-        const { data, error } = await supabase.from('conversations').insert({
-          session_id: userEmail,
-          character_id: characterId,
-          user_message: query,
-          avatar_response: responseText
-        });
-        
-        if (error) {
-          console.error('[CHAT] 💥 CRITICAL: Failed to log conversation:', JSON.stringify(error, null, 2));
-          console.error('[CHAT] This will break rate limiting!');
-        } else {
-          console.log('[CHAT] ✅ Conversation logged successfully for rate limiting');
-        }
-      } catch (err) {
-        console.error('[CHAT] 💥 CRITICAL: Conversation logging exception:', err);
-      }
-    }
-
-    return NextResponse.json({ 
+    return NextResponse.json({
       text: responseText,
+      character: character.name,
+      engine,
       cached: false,
-      source: 'generated',
-      interactionsCount,
-      isAdmin
+      interactionsCount: 1,
+      isAdmin: true,
     });
 
   } catch (error: any) {
-    console.error('[CHAT] API Error:', error);
-    console.error('[CHAT] Error stack:', error.stack);
-    return NextResponse.json({ 
-      error: error.message || 'Internal Server Error',
-      details: error.stack?.split('\n')[0] || 'Unknown error'
-    }, { status: 500 });
+    console.error('[CHAT] Error in chat endpoint:', error);
+    return NextResponse.json(
+      { error: error.message || 'Failed to process chat discourse' },
+      { status: 500 }
+    );
   }
 }

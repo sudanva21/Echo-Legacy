@@ -77,7 +77,7 @@ Goal: Shareable link working
 
 ---
 
-## Day 6-7 — Hackathon Prep
+## Day 6-7 — AI Expo Prep
 
 - [ ] Prepare demo script (under 2 minutes)
 - [ ] Pre-generate best demo responses as cached MP4
@@ -87,7 +87,7 @@ Goal: Shareable link working
 
 ---
 
-## Hackathon Day (June 22) — 48 Hours
+## AI Expo Day — Showcase & Demos
 
 ### Hour 0-2: Launch
 - [ ] Post demo video: "I built something. You can talk to Osho. In his voice. Live."
