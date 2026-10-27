@@ -30,13 +30,14 @@ export async function logConversationToFirebase(userEmail: string, characterId: 
     });
     console.log('[FIREBASE] Conversation logged successfully');
   } catch (err: any) {
-    if (err?.code === 7 || err?.message?.includes('PERMISSION_DENIED')) {
+    if (err?.message?.includes('Cloud Firestore API has not been used')) {
       firestoreDisabled = true;
       console.warn('[FIREBASE] Firestore API not enabled on project; disabling firestore logging');
     } else {
       console.warn('[FIREBASE] Conversation logging skipped:', err?.message || err);
     }
   }
+
 }
 
 export default app;
