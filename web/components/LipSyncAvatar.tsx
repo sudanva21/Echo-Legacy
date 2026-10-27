@@ -28,19 +28,26 @@ export default function LipSyncAvatar({
   onVideoError
 }: LipSyncAvatarProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [isMutedByBrowser, setIsMutedByBrowser] = React.useState(false)
 
   // Play video automatically when it becomes available
   useEffect(() => {
     if (videoUrl && videoRef.current) {
+      setIsMutedByBrowser(false)
       videoRef.current.currentTime = 0
       videoRef.current.muted = false
+      
       const playPromise = videoRef.current.play()
       if (playPromise !== undefined) {
         playPromise.catch(e => {
-          console.warn('Video unmuted auto-play was blocked or failed:', e)
-          // Retry playback
+          console.warn('Video unmuted auto-play blocked by browser policy:', e)
+          // Fallback: Play muted first so lip-sync video is never lost, and show unmute toggle
           if (videoRef.current) {
-            videoRef.current.play().catch(() => {
+            videoRef.current.muted = true
+            videoRef.current.play().then(() => {
+              setIsMutedByBrowser(true)
+            }).catch((mutedErr) => {
+              console.error('Video decode/playback error:', mutedErr)
               if (onVideoError) onVideoError()
             })
           }
@@ -49,12 +56,24 @@ export default function LipSyncAvatar({
     }
   }, [videoUrl, onVideoError])
 
+  const handleUnmute = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (videoRef.current) {
+      videoRef.current.muted = false
+      setIsMutedByBrowser(false)
+    }
+  }
+
   return (
-    <div className={`relative w-full aspect-[4/5] max-w-sm rounded-2xl overflow-hidden bg-zinc-950 transition-all duration-500 shadow-2xl flex items-center justify-center group ${
-      isSpeaking
-        ? 'border-2 border-emerald-500/80 shadow-[0_0_50px_rgba(16,185,129,0.35)] ring-4 ring-emerald-500/20'
-        : 'border border-zinc-800'
-    }`}>
+    <div 
+      onClick={isMutedByBrowser ? handleUnmute : undefined}
+      className={`relative w-full aspect-[4/5] max-w-sm rounded-2xl overflow-hidden bg-zinc-950 transition-all duration-500 shadow-2xl flex items-center justify-center group ${
+        isMutedByBrowser ? 'cursor-pointer ring-2 ring-amber-500/50' : ''
+      } ${
+        isSpeaking
+          ? 'border-2 border-emerald-500/80 shadow-[0_0_50px_rgba(16,185,129,0.35)] ring-4 ring-emerald-500/20'
+          : 'border border-zinc-800'
+      }`}>
       {/* 1. High-Resolution Original Historical Portrait (Always un-distorted & naturally proportioned) */}
       <img
         src={image}
@@ -92,10 +111,20 @@ export default function LipSyncAvatar({
       {/* Live Status Indicators */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 z-20 pointer-events-none whitespace-nowrap">
         {videoUrl ? (
-          <div className="bg-black/90 backdrop-blur-md border border-cyan-500/40 text-cyan-300 px-4 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2 shadow-xl animate-in fade-in">
-            <Film size={14} className="text-cyan-400 animate-pulse" />
-            <span>AI Neural Lip-Sync Video</span>
-          </div>
+          isMutedByBrowser ? (
+            <button
+              onClick={handleUnmute}
+              className="pointer-events-auto bg-amber-500 hover:bg-amber-400 text-black px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.6)] animate-bounce transition-all cursor-pointer"
+            >
+              <Volume2 size={14} className="text-black" />
+              <span>Tap to Unmute Voice</span>
+            </button>
+          ) : (
+            <div className="bg-black/90 backdrop-blur-md border border-cyan-500/40 text-cyan-300 px-4 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2 shadow-xl animate-in fade-in">
+              <Film size={14} className="text-cyan-400 animate-pulse" />
+              <span>AI Neural Lip-Sync Video</span>
+            </div>
+          )
         ) : isSpeaking ? (
           <div className="bg-black/90 backdrop-blur-md border border-emerald-500/40 text-emerald-300 px-4 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2.5 shadow-xl">
             <div className="flex items-center gap-0.5 h-3">
