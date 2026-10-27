@@ -70,13 +70,37 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
     }
   }
 
-  // Text-to-Speech browser fallback
-  const speakWithBrowserSynthesis = (text: string) => {
+  // Text-to-Speech browser synthesis tailored to each historical persona
+  const speakWithBrowserSynthesis = (text: string, charId: CharacterId) => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel()
       const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 0.95
-      utterance.pitch = 1.0
+
+      // Character-tailored vocal speed and pitch
+      if (charId === 'osho') {
+        utterance.rate = 0.88 // Slow, hypnotic, reflective
+        utterance.pitch = 0.85
+      } else if (charId === 'bhagat_singh') {
+        utterance.rate = 1.05 // Passionate, bold
+        utterance.pitch = 0.95
+      } else if (charId === 'tesla') {
+        utterance.rate = 1.0 // Crisp, focused
+        utterance.pitch = 1.1
+      } else if (charId === 'ssr') {
+        utterance.rate = 1.02 // Energetic, thoughtful
+        utterance.pitch = 1.02
+      } else if (charId === 'hitler') {
+        utterance.rate = 0.95
+        utterance.pitch = 0.9
+      }
+
+      utterance.onend = () => {
+        setPhase('idle')
+      }
+      utterance.onerror = () => {
+        setPhase('idle')
+      }
+
       window.speechSynthesis.speak(utterance)
     }
   }
@@ -104,7 +128,7 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
     setVideoUrl(null)
 
     try {
-      // 1. Get Character Response (LLM)
+      // 1. Get Character Response (LLM) - Fast & Grounded
       const chatRes = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -120,63 +144,48 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
         throw new Error(chatData.error || 'Failed to generate discourse')
       }
 
-      const responseText = chatData.text
-      setPhase('speaking')
+      const responseText = chatData.text || 'I am here with you.'
 
-      // 2. Synthesize Character Voice (TTS)
-      const ttsRes = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: responseText,
-          characterId,
-          userEmail: user?.email || 'guest@ecolegacy.ai'
+      // Render character response to transcript
+      setTranscript(prev => [...prev, {
+        role: 'avatar',
+        content: responseText
+      }])
+
+      // 2. Fetch authentic cloned voice from Smallest.ai via /api/tts
+      try {
+        const ttsRes = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: responseText,
+            characterId,
+            userEmail: user?.email || 'guest@ecolegacy.ai'
+          }),
+          signal: AbortSignal.timeout(22000)
         })
-      })
 
-      const ttsData = await ttsRes.json()
-      const generatedAudioUrl = ttsData?.audioUrl as string | undefined
+        const ttsData = await ttsRes.json()
+        const generatedAudioUrl = ttsData?.audioUrl as string | undefined
 
-      if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
-        setAudioUrl(generatedAudioUrl)
-        setTranscript(prev => [...prev, {
-          role: 'avatar',
-          content: responseText,
-          audioUrl: generatedAudioUrl
-        }])
-      } else {
-        // Fallback to browser speech synthesis
-        speakWithBrowserSynthesis(responseText)
-        setTranscript(prev => [...prev, {
-          role: 'avatar',
-          content: responseText
-        }])
-      }
-
-      setPhase('animating')
-
-      // 3. Optional video animation
-      if (generatedAudioUrl) {
-        try {
-          const vidRes = await fetch('/api/animate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ audioUrl: generatedAudioUrl, characterId })
-          })
-          const vidData = await vidRes.json()
-          if (vidRes.ok && vidData.videoUrl) {
-            setVideoUrl(vidData.videoUrl)
-          }
-        } catch {
-          // Video animation is optional
+        if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
+          setAudioUrl(generatedAudioUrl)
+          setPhase('speaking')
+        } else {
+          // Fallback to browser speech synthesis only if audio clone failed
+          setPhase('speaking')
+          speakWithBrowserSynthesis(responseText, characterId)
         }
+      } catch (ttsErr) {
+        console.warn('[AVATAR] TTS fetch failed, falling back to browser speech:', ttsErr)
+        setPhase('speaking')
+        speakWithBrowserSynthesis(responseText, characterId)
       }
 
     } catch (err: unknown) {
       console.error(err)
       const msg = err instanceof Error ? err.message : String(err)
-      setTranscript(prev => [...prev, { role: 'avatar', content: `[${character.name}]: I am present here with you. Let us speak again.` }])
-    } finally {
+      setTranscript(prev => [...prev, { role: 'avatar', content: `[${character.name}]: I hear your search. Let us reflect together.` }])
       setPhase('idle')
     }
   }
@@ -290,7 +299,11 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
   // Auto-play audio when available
   useEffect(() => {
     if (audioUrl && isValidAudioUrl(audioUrl) && !videoUrl && audioRef.current) {
-      audioRef.current.play().catch(e => console.error("Audio autoplay failed:", e))
+      audioRef.current.currentTime = 0
+      audioRef.current.play().catch(e => {
+        console.error("Audio autoplay failed:", e)
+        setPhase('idle')
+      })
     }
   }, [audioUrl, videoUrl])
 
@@ -377,7 +390,13 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
 
           {/* Hidden audio element for speech playback */}
           {audioUrl && !videoUrl && (
-            <audio ref={audioRef} src={audioUrl} className="hidden" />
+            <audio 
+              ref={audioRef} 
+              src={audioUrl} 
+              className="hidden" 
+              onEnded={() => setPhase('idle')}
+              onError={() => setPhase('idle')}
+            />
           )}
 
           {/* Audio Download Button */}

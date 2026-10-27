@@ -14,7 +14,10 @@ const firebaseConfig = {
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app);
 
+let firestoreDisabled = false;
+
 export async function logConversationToFirebase(userEmail: string, characterId: string, userMessage: string, avatarResponse: string) {
+  if (firestoreDisabled) return;
   try {
     const colRef = collection(db, 'conversations');
     await addDoc(colRef, {
@@ -26,8 +29,13 @@ export async function logConversationToFirebase(userEmail: string, characterId: 
       created_at: new Date().toISOString()
     });
     console.log('[FIREBASE] Conversation logged successfully');
-  } catch (err) {
-    console.warn('[FIREBASE] Conversation logging skipped or failed:', err);
+  } catch (err: any) {
+    if (err?.code === 7 || err?.message?.includes('PERMISSION_DENIED')) {
+      firestoreDisabled = true;
+      console.warn('[FIREBASE] Firestore API not enabled on project; disabling firestore logging');
+    } else {
+      console.warn('[FIREBASE] Conversation logging skipped:', err?.message || err);
+    }
   }
 }
 

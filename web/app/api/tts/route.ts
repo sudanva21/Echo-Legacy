@@ -1,75 +1,85 @@
 import { NextResponse } from 'next/server';
 import { characters, CharacterId } from '@/utils/characters';
-import { getReferenceAudioPath } from '@/utils/referenceAudioPath';
-import { extractGradioAudioPath } from '@/utils/gradioAudio';
-import { getErrorMessage, isValidAudioUrl } from '@/utils/errorMessage';
-import fs from 'fs';
 
-const HF_SPACE = 'chenxie95/Cross-Lingual_F5-TTS_Space';
+// Official pre-trained Smallest.ai voice clones for all 5 characters
+const CHARACTER_VOICE_IDS: Record<string, string> = {
+  osho: 'voice_SlEiKoRgNX',
+  bhagat_singh: 'voice_k1KX1wW56a',
+  ssr: 'voice_OdTNncyyNP',
+  tesla: 'voice_RrcezTCRAl',
+  hitler: 'voice_TGaoN2HRlM',
+};
 
-function getHfTokens(): string[] {
-  return [
-    process.env.HUGGINGFACE_TOKEN,
-    process.env.HUGGINGFACE_TOKEN_1,
-    process.env.HUGGINGFACE_TOKEN_2,
-    process.env.HUGGINGFACE_TOKEN_3,
-    process.env.HUGGINGFACE_TOKEN_4,
-    process.env.HUGGINGFACE_TOKEN_5,
-  ].filter(Boolean) as string[];
-}
-
-/** Voice clone using character reference clip via Hugging Face F5-TTS */
-async function generateWithHuggingFace(
+/** High-fidelity voice synthesis using Smallest.ai Lightning v3.1 API */
+async function generateWithSmallestAi(
   text: string,
-  characterId: CharacterId,
-  referenceAudioPath: string,
+  characterId: string,
+  apiKey: string,
 ): Promise<{ audioUrl: string; source: string }> {
-  const hfTokens = getHfTokens();
-  if (hfTokens.length === 0) {
-    throw new Error('No HUGGINGFACE_TOKEN configured');
-  }
+  const voiceId = CHARACTER_VOICE_IDS[characterId] || CHARACTER_VOICE_IDS.osho;
+  const url = 'https://api.smallest.ai/waves/v1/lightning-v3.1/get_speech';
 
-  const { Client, handle_file } = await import('@gradio/client');
-  let lastError: unknown = null;
+  // Sanitize and optimize text length for lightning-fast voice synthesis (2-3 seconds)
+  let cleanText = text
+    .replace(/[*_#`~[\]()]/g, '') // remove markdown
+    .replace(/[^\x00-\x7F]/g, ' ') // remove non-ASCII
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  for (let i = 0; i < hfTokens.length; i++) {
-    const token = hfTokens[i];
-    try {
-      console.log(`[TTS] Trying HF F5-TTS Space (token ${i + 1}/${hfTokens.length})...`);
-      const gradioClient = await Client.connect(HF_SPACE, { hf_token: token } as any);
-      const character = characters[characterId];
-
-      const result = await gradioClient.predict('/basic_tts', {
-        ref_wav_input: handle_file(referenceAudioPath),
-        ref_text_input: character.referenceText || '',
-        gen_txt_input: text,
-        randomize_seed: true,
-        seed_input: 0,
-      });
-
-      const audioPath = extractGradioAudioPath(result);
-      if (audioPath) {
-        console.log(`[TTS] HF F5-TTS successfully produced audio:`, audioPath);
-        return { audioUrl: audioPath, source: 'huggingface-f5' };
-      }
-    } catch (err: unknown) {
-      lastError = err;
-      console.warn(`[TTS] HF token ${i + 1} failed:`, getErrorMessage(err));
+  // If text is too long, take the first two complete sentences to prevent synthesis lag
+  if (cleanText.length > 280) {
+    const sentences = cleanText.match(/[^.!?]+[.!?]+/g);
+    if (sentences && sentences.length >= 2) {
+      cleanText = sentences.slice(0, 2).join(' ').trim();
+    } else {
+      cleanText = cleanText.substring(0, 280).trim();
     }
   }
 
-  throw new Error(`HF F5-TTS failed: ${getErrorMessage(lastError)}`);
+  console.log(`[TTS] Synthesizing speech with Smallest.ai for "${characterId}" (voiceId: ${voiceId}, len: ${cleanText.length})...`);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      text: cleanText,
+      voice_id: voiceId,
+      speed: 1.0,
+      sample_rate: 24000,
+      output_format: 'wav',
+    }),
+    signal: AbortSignal.timeout(20000), // 20s generous timeout so it never prematurely aborts
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Smallest.ai returned HTTP ${response.status}: ${errText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength < 500) {
+    throw new Error('Smallest.ai returned invalid or empty audio');
+  }
+
+  const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+  const audioUrl = `data:audio/wav;base64,${base64Audio}`;
+
+  console.log(`[TTS] Smallest.ai successfully synthesized ${arrayBuffer.byteLength} bytes of cloned audio for ${characterId}`);
+  return { audioUrl, source: 'smallest-ai-cloned' };
 }
 
-/** Generate audio via local Python TTS server (Edge-TTS) */
+/** Fallback: Local TTS server (Edge-TTS models) */
 async function generateWithLocalServer(
   text: string,
   characterId: CharacterId,
 ): Promise<{ audioUrl: string; source: string }> {
   const localTtsUrl = process.env.LOCAL_TTS_URL || 'http://localhost:5000';
-  const localTimeoutMs = Number(process.env.LOCAL_TTS_TIMEOUT_MS || 25000);
+  const localTimeoutMs = Number(process.env.LOCAL_TTS_TIMEOUT_MS || 2500);
 
-  console.log(`[TTS] Calling local TTS server at ${localTtsUrl}/tts for ${characterId}...`);
+  console.log(`[TTS] Trying local TTS fallback at ${localTtsUrl}/tts for ${characterId}...`);
 
   const response = await fetch(`${localTtsUrl}/tts`, {
     method: 'POST',
@@ -84,20 +94,19 @@ async function generateWithLocalServer(
   }
 
   const arrayBuffer = await response.arrayBuffer();
-  if (arrayBuffer.byteLength < 100) {
+  if (arrayBuffer.byteLength < 500) {
     throw new Error('Local TTS returned insufficient audio data');
   }
 
   const base64Audio = Buffer.from(arrayBuffer).toString('base64');
   const audioUrl = `data:audio/wav;base64,${base64Audio}`;
 
-  console.log(`[TTS] Local TTS successfully generated audio (${arrayBuffer.byteLength} bytes)`);
   return { audioUrl, source: 'local-neural-tts' };
 }
 
 export async function POST(req: Request) {
   try {
-    const { text, characterId, userEmail } = await req.json();
+    const { text, characterId } = await req.json();
 
     if (!text || typeof text !== 'string') {
       return NextResponse.json({ error: 'Text is required' }, { status: 400 });
@@ -106,9 +115,25 @@ export async function POST(req: Request) {
     const id = ((characterId as CharacterId) in characters ? characterId : 'osho') as CharacterId;
     const character = characters[id];
 
-    console.log(`[TTS] Synthesizing speech for ${character.name}: "${text.substring(0, 50)}..."`);
+    console.log(`[TTS] Speech request for ${character.name}: "${text.substring(0, 50)}..."`);
 
-    // 1. Primary: Ultra-fast local neural TTS server (Edge-TTS models)
+    // 1. Primary Engine: Smallest.ai authentic character voice clone
+    const smallestKey = process.env.SMALLEST_API_KEY || 'sk_807304f995e368e0e86ff84dd9f48691';
+    if (smallestKey) {
+      try {
+        const result = await generateWithSmallestAi(text, id, smallestKey);
+        return NextResponse.json({
+          audioUrl: result.audioUrl,
+          cached: false,
+          source: result.source,
+          character: character.name,
+        });
+      } catch (smallestErr: any) {
+        console.warn('[TTS] Smallest.ai failed, falling back to secondary:', smallestErr.message);
+      }
+    }
+
+    // 2. Secondary Engine: Local neural TTS
     try {
       const localResult = await generateWithLocalServer(text, id);
       return NextResponse.json({
@@ -118,27 +143,11 @@ export async function POST(req: Request) {
         character: character.name,
       });
     } catch (localErr: any) {
-      console.warn('[TTS] Local TTS server not available or failed:', localErr.message);
+      console.warn('[TTS] Local TTS server failed:', localErr.message);
     }
 
-    // 2. Secondary: HuggingFace F5-TTS reference voice cloning
-    try {
-      const referenceAudioPath = getReferenceAudioPath(id);
-      if (fs.existsSync(referenceAudioPath)) {
-        const hfResult = await generateWithHuggingFace(text, id, referenceAudioPath);
-        return NextResponse.json({
-          audioUrl: hfResult.audioUrl,
-          cached: false,
-          source: hfResult.source,
-          character: character.name,
-        });
-      }
-    } catch (hfErr: any) {
-      console.warn('[TTS] HuggingFace F5-TTS failed:', hfErr.message);
-    }
-
-    // 3. Fallback: If both fail, return structured signal for client-side Web Speech API
-    console.log('[TTS] Falling back to client-side speech synthesis');
+    // 3. Fallback: Browser Web Speech API
+    console.log('[TTS] Falling back to browser speech synthesis');
     return NextResponse.json({
       audioUrl: null,
       fallbackToSpeechSynthesis: true,
@@ -148,7 +157,7 @@ export async function POST(req: Request) {
     });
 
   } catch (error: any) {
-    console.error('[TTS] Fatal error:', error);
+    console.error('[TTS] Fatal error in TTS route:', error);
     return NextResponse.json(
       { error: error.message || 'TTS generation failed' },
       { status: 500 },
