@@ -1,7 +1,27 @@
 import { NextResponse } from 'next/server';
 import { characters, CharacterId } from '@/utils/characters';
 import { logConversationToFirebase } from '@/utils/firebase';
+import { createClient } from '@supabase/supabase-js';
 import Groq from 'groq-sdk';
+
+// Log conversation to Supabase PostgreSQL asynchronously
+async function logConversationToSupabase(characterId: string, userMessage: string, avatarResponse: string, sessionId?: string) {
+  try {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!supabaseUrl || !supabaseKey) return;
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    await supabase.from('conversations').insert({
+      character_id: characterId,
+      user_message: userMessage,
+      avatar_response: avatarResponse,
+      session_id: sessionId || `session_${Date.now()}`
+    });
+    console.log('[SUPABASE] Conversation recorded to PostgreSQL');
+  } catch (err: any) {
+    console.warn('[SUPABASE] Conversation recording skipped:', err?.message || err);
+  }
+}
 
 // Authentic, in-depth persona system prompts grounded in historical voice and corpus
 const CHARACTER_PROMPTS: Record<string, string> = {
@@ -256,7 +276,8 @@ export async function POST(req: Request) {
       }
     }
 
-    // Asynchronously log to Firebase
+    // Asynchronously log to Supabase & Firebase
+    logConversationToSupabase(id, query, responseText);
     logConversationToFirebase(userEmail || 'guest@ecolegacy.ai', id, query, responseText);
 
     return NextResponse.json({
