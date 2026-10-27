@@ -45,14 +45,15 @@ export async function POST(req: Request) {
         audio_url: audioUrl,
         character_id: characterId || 'osho',
       }),
-      signal: AbortSignal.timeout(30000), // 30s timeout for video generation
+      signal: AbortSignal.timeout(60000), // 60s timeout for video generation
     });
 
     if (!animateRes.ok) {
-      console.warn(`[Animate] Ngrok server responded with status: ${animateRes.status}`);
+      const errText = await animateRes.text().catch(() => '');
+      console.warn(`[Animate] Wav2Lip server responded with status: ${animateRes.status}`, errText);
       return NextResponse.json({
         videoUrl: null,
-        message: `Wav2Lip server unavailable (${animateRes.status}). Playing audio only.`,
+        message: `Wav2Lip server unavailable (${animateRes.status}): ${errText.slice(0, 100)}. Playing audio only.`,
       });
     }
 

@@ -330,6 +330,9 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
 
   useEffect(() => {
     if (videoUrl && videoRef.current) {
+      if (audioRef.current) {
+        audioRef.current.pause()
+      }
       videoRef.current.play().catch(e => console.error("Video autoplay failed:", e))
     }
   }, [videoUrl])
@@ -364,6 +367,8 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
               className="w-full h-full object-cover rounded-xl shadow-2xl"
               controls
               autoPlay
+              onEnded={() => setPhase('idle')}
+              onError={() => setPhase('idle')}
             />
           ) : (
             <div className={`relative w-full aspect-square max-w-sm rounded-2xl overflow-hidden bg-zinc-950 transition-all duration-500 shadow-2xl flex items-center justify-center group ${
