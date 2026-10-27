@@ -171,11 +171,32 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
         if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
           setAudioUrl(generatedAudioUrl)
           setPhase('speaking')
+
+          // Asynchronously query Wav2Lip animation server (Colab / Ngrok) if configured
+          fetch('/api/animate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audioUrl: generatedAudioUrl,
+              characterId: characterId,
+            }),
+          })
+            .then(res => res.json())
+            .then(animData => {
+              if (animData?.videoUrl) {
+                console.log('[AVATAR] Received synchronized Wav2Lip video:', animData.videoUrl)
+                setVideoUrl(animData.videoUrl)
+              }
+            })
+            .catch(() => {
+              // Video animation server is optional; speech continues seamlessly
+            })
         } else {
           // Fallback to browser speech synthesis only if audio clone failed
           setPhase('speaking')
           speakWithBrowserSynthesis(responseText, characterId)
         }
+
       } catch (ttsErr) {
         console.warn('[AVATAR] TTS fetch failed, falling back to browser speech:', ttsErr)
         setPhase('speaking')
@@ -345,20 +366,31 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
               autoPlay
             />
           ) : (
-            <div className="relative w-full aspect-square max-w-sm rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-800 shadow-2xl flex items-center justify-center group">
+            <div className={`relative w-full aspect-square max-w-sm rounded-2xl overflow-hidden bg-zinc-950 transition-all duration-500 shadow-2xl flex items-center justify-center group ${
+              phase === 'speaking' 
+                ? 'border-2 border-emerald-500/70 shadow-[0_0_50px_rgba(16,185,129,0.35)] ring-4 ring-emerald-500/20' 
+                : 'border border-zinc-800'
+            }`}>
               <img 
                 src={character.image} 
                 alt={character.name} 
-                className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-105"
+                className={`absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out ${
+                  phase === 'speaking' ? 'scale-[1.05]' : 'group-hover:scale-105'
+                }`}
                 onError={(e) => {
                   e.currentTarget.src = "https://upload.wikimedia.org/wikipedia/commons/3/33/Osho_in_his_library_1.jpg"
                 }}
               />
               <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
               
+              {/* Audio-reactive speech wave overlay */}
+              {phase === 'speaking' && (
+                <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-emerald-950/40 via-transparent to-transparent pointer-events-none animate-pulse" />
+              )}
+              
               {/* Status Overlay */}
               {phase !== 'idle' && (
-                <div className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-md border border-white/10 text-white px-5 py-2.5 rounded-full text-sm flex items-center gap-2.5 shadow-xl whitespace-nowrap">
+                <div className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur-md border border-white/10 text-white px-5 py-2.5 rounded-full text-sm flex items-center gap-2.5 shadow-xl whitespace-nowrap z-10">
                   {phase === 'listening' && (
                     <>
                       <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
@@ -372,10 +404,17 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
                     </>
                   )}
                   {phase === 'speaking' && (
-                    <>
-                      <Volume2 size={16} className="text-emerald-400 animate-pulse" />
-                      <span>Speaking...</span>
-                    </>
+                    <div className="flex items-center gap-2">
+                      {/* Animated Voice Equalizer */}
+                      <div className="flex items-center gap-0.5 h-4 px-0.5">
+                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-3" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-bounce h-4" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-2.5" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-bounce h-4" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-3" />
+                      </div>
+                      <span className="text-emerald-400 font-medium tracking-wide">Speaking...</span>
+                    </div>
                   )}
                   {phase === 'animating' && (
                     <>
@@ -386,6 +425,7 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
                 </div>
               )}
             </div>
+
           )}
 
           {/* Hidden audio element for speech playback */}

@@ -10,7 +10,7 @@ function isNgrokConfigured(url: string | undefined): boolean {
 
 export async function POST(req: Request) {
   try {
-    const { audioUrl } = await req.json();
+    const { audioUrl, characterId } = await req.json();
 
     if (!audioUrl) {
       return NextResponse.json({ error: 'Audio URL is required' }, { status: 400 });
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
       });
     }
 
-    console.log('[Animate] Requesting animation for audio:', audioUrl.slice(0, 80) + '...');
+    console.log(`[Animate] Requesting animation for ${characterId || 'unknown'}:`, audioUrl.slice(0, 80) + '...');
     
     const ngrokUrl = process.env.NGROK_URL;
 
@@ -43,7 +43,9 @@ export async function POST(req: Request) {
       },
       body: JSON.stringify({
         audio_url: audioUrl,
-      })
+        character_id: characterId || 'osho',
+      }),
+      signal: AbortSignal.timeout(30000), // 30s timeout for video generation
     });
 
     if (!animateRes.ok) {
