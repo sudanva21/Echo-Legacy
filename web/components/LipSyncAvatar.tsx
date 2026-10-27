@@ -33,10 +33,19 @@ export default function LipSyncAvatar({
   useEffect(() => {
     if (videoUrl && videoRef.current) {
       videoRef.current.currentTime = 0
-      videoRef.current.play().catch(e => {
-        console.warn('Video auto-play failed:', e)
-        if (onVideoError) onVideoError()
-      })
+      videoRef.current.muted = false
+      const playPromise = videoRef.current.play()
+      if (playPromise !== undefined) {
+        playPromise.catch(e => {
+          console.warn('Video unmuted auto-play was blocked or failed:', e)
+          // Retry playback
+          if (videoRef.current) {
+            videoRef.current.play().catch(() => {
+              if (onVideoError) onVideoError()
+            })
+          }
+        })
+      }
     }
   }, [videoUrl, onVideoError])
 

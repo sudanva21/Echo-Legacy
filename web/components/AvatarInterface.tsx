@@ -172,32 +172,36 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
         const generatedAudioUrl = ttsData?.audioUrl as string | undefined
 
         if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
-          setAudioUrl(generatedAudioUrl)
-          setPhase('speaking')
+          setPhase('animating')
           setIsVideoRendering(true)
 
-          // Asynchronously query Wav2Lip animation server (Colab / Ngrok) if configured
-          fetch('/api/animate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              audioUrl: generatedAudioUrl,
-              characterId: characterId,
-            }),
-          })
-            .then(res => res.json())
-            .then(animData => {
-              if (animData?.videoUrl) {
-                console.log('[AVATAR] Received synchronized Wav2Lip video:', animData.videoUrl)
-                setVideoUrl(animData.videoUrl)
-              }
+          try {
+            // Query Wav2Lip animation server (Colab / Ngrok)
+            const animRes = await fetch('/api/animate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audioUrl: generatedAudioUrl,
+                characterId: characterId,
+              }),
             })
-            .catch(() => {
-              // Video animation server is optional; speech continues seamlessly
-            })
-            .finally(() => {
+
+            const animData = await animRes.json()
+            if (animData?.videoUrl) {
+              console.log('[AVATAR] Received synchronized Wav2Lip video')
+              setVideoUrl(animData.videoUrl)
+              setPhase('speaking')
               setIsVideoRendering(false)
-            })
+              return
+            }
+          } catch (animErr) {
+            console.warn('[AVATAR] Video animation fetch failed, playing audio directly:', animErr)
+          }
+
+          // Fallback to audio-only if video server is unavailable
+          setIsVideoRendering(false)
+          setAudioUrl(generatedAudioUrl)
+          setPhase('speaking')
         } else {
           // Fallback to browser speech synthesis only if audio clone failed
           setPhase('speaking')
