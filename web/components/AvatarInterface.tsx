@@ -8,6 +8,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { isValidAudioUrl } from '@/utils/errorMessage'
 import FeedbackModal from '@/components/FeedbackModal'
+import LipSyncAvatar from '@/components/LipSyncAvatar'
 
 type Phase = 'idle' | 'listening' | 'thinking' | 'speaking' | 'animating'
 
@@ -30,6 +31,7 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
   const [isListening, setIsListening] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [isVideoRendering, setIsVideoRendering] = useState(false)
   const [isClient, setIsClient] = useState(false)
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false)
   
@@ -126,6 +128,7 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
     setPhase('thinking')
     setAudioUrl(null)
     setVideoUrl(null)
+    setIsVideoRendering(false)
 
     try {
       // 1. Get Character Response (LLM) - Fast & Grounded
@@ -171,6 +174,7 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
         if (generatedAudioUrl && isValidAudioUrl(generatedAudioUrl)) {
           setAudioUrl(generatedAudioUrl)
           setPhase('speaking')
+          setIsVideoRendering(true)
 
           // Asynchronously query Wav2Lip animation server (Colab / Ngrok) if configured
           fetch('/api/animate', {
@@ -190,6 +194,9 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
             })
             .catch(() => {
               // Video animation server is optional; speech continues seamlessly
+            })
+            .finally(() => {
+              setIsVideoRendering(false)
             })
         } else {
           // Fallback to browser speech synthesis only if audio clone failed
@@ -329,11 +336,8 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
   }, [audioUrl, videoUrl])
 
   useEffect(() => {
-    if (videoUrl && videoRef.current) {
-      if (audioRef.current) {
-        audioRef.current.pause()
-      }
-      videoRef.current.play().catch(e => console.error("Video autoplay failed:", e))
+    if (videoUrl && audioRef.current) {
+      audioRef.current.pause()
     }
   }, [videoUrl])
 
@@ -360,77 +364,34 @@ export default function AvatarInterface({ user, characterId }: { user: any, char
         
         {/* Avatar Visuals */}
         <div className="w-full md:w-1/2 flex flex-col items-center justify-center bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-6 relative overflow-hidden backdrop-blur-sm">
-          {videoUrl ? (
-            <video 
-              ref={videoRef}
-              src={videoUrl} 
-              className="w-full h-full object-cover rounded-xl shadow-2xl"
-              controls
-              autoPlay
-              onEnded={() => setPhase('idle')}
-              onError={() => setPhase('idle')}
-            />
-          ) : (
-            <div className={`relative w-full aspect-square max-w-sm rounded-2xl overflow-hidden bg-zinc-950 transition-all duration-500 shadow-2xl flex items-center justify-center group ${
-              phase === 'speaking' 
-                ? 'border-2 border-emerald-500/70 shadow-[0_0_50px_rgba(16,185,129,0.35)] ring-4 ring-emerald-500/20' 
-                : 'border border-zinc-800'
-            }`}>
-              <img 
-                src={character.image} 
-                alt={character.name} 
-                className={`absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out ${
-                  phase === 'speaking' ? 'scale-[1.05]' : 'group-hover:scale-105'
-                }`}
-                onError={(e) => {
-                  e.currentTarget.src = "https://upload.wikimedia.org/wikipedia/commons/3/33/Osho_in_his_library_1.jpg"
-                }}
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
-              
-              {/* Audio-reactive speech wave overlay */}
-              {phase === 'speaking' && (
-                <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-emerald-950/40 via-transparent to-transparent pointer-events-none animate-pulse" />
+          <LipSyncAvatar
+            image={character.image}
+            name={character.name}
+            characterId={characterId}
+            isSpeaking={phase === 'speaking'}
+            audioElement={audioRef.current}
+            videoUrl={videoUrl}
+            isVideoRendering={isVideoRendering}
+            onVideoEnded={() => setPhase('idle')}
+            onVideoError={() => setVideoUrl(null)}
+          />
+
+          {/* Status Overlay for Listening / Thinking */}
+          {(phase === 'listening' || phase === 'thinking') && (
+            <div className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur-md border border-white/10 text-white px-5 py-2.5 rounded-full text-sm flex items-center gap-2.5 shadow-xl whitespace-nowrap z-30">
+              {phase === 'listening' && (
+                <>
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                  <span className="text-red-400 font-medium">Listening to your voice...</span>
+                </>
               )}
-              
-              {/* Status Overlay */}
-              {phase !== 'idle' && (
-                <div className="absolute bottom-5 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur-md border border-white/10 text-white px-5 py-2.5 rounded-full text-sm flex items-center gap-2.5 shadow-xl whitespace-nowrap z-10">
-                  {phase === 'listening' && (
-                    <>
-                      <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-                      <span className="text-red-400 font-medium">Listening to your voice...</span>
-                    </>
-                  )}
-                  {phase === 'thinking' && (
-                    <>
-                      <Loader2 size={16} className="animate-spin text-indigo-400" />
-                      <span>Reflecting...</span>
-                    </>
-                  )}
-                  {phase === 'speaking' && (
-                    <div className="flex items-center gap-2">
-                      {/* Animated Voice Equalizer */}
-                      <div className="flex items-center gap-0.5 h-4 px-0.5">
-                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-3" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-bounce h-4" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-2.5" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-bounce h-4" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-pulse h-3" />
-                      </div>
-                      <span className="text-emerald-400 font-medium tracking-wide">Speaking...</span>
-                    </div>
-                  )}
-                  {phase === 'animating' && (
-                    <>
-                      <Sparkles size={16} className="text-cyan-400" />
-                      <span>Animating discourse...</span>
-                    </>
-                  )}
-                </div>
+              {phase === 'thinking' && (
+                <>
+                  <Loader2 size={16} className="animate-spin text-indigo-400" />
+                  <span>Reflecting...</span>
+                </>
               )}
             </div>
-
           )}
 
           {/* Hidden audio element for speech playback */}
